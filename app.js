@@ -2,82 +2,129 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import Groq from "groq-sdk";
+import { tavily } from "@tavily/core";
 
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
 
+const tvly = tavily({
+  apiKey: process.env.TAVILY_API_KEY,
+});
+
+// ---------------- Tool ----------------
+
+async function webSearch({ query }) {
+  console.log("Searching:", query);
+
+  const response = await tvly.search(query);
+
+  // Keep only the first 2 results
+  const finalResult = response.results
+    .slice(0, 2)
+    .map(result => {
+      return `
+Title: ${result.title}
+URL: ${result.url}
+Content: ${result.content.substring(0, 300)}
+`;
+    })
+    .join("\n\n");
+
+  return finalResult;
+}
+
+// ---------------- Main ----------------
+
 async function main() {
-  const completions = await groq.chat.completions.create({
+  const messages = [
+    {
+      role: "system",
+      content:
+        "You are a helpful AI assistant. If the user asks about recent or realtime information, use the available tools.",
+    },
+    {
+      role: "user",
+      content: "When was iPhone 16 launched?",
+    },
+  ];
+
+  // First LLM call
+  const firstResponse = await groq.chat.completions.create({
     model: "openai/gpt-oss-20b",
+    messages,
     temperature: 0,
-    messages: [
+    tool_choice: "auto",
+    tools: [
       {
-        role: "system",
-        content: `You are a smart personal assistant. When a question requires recent or realtime information, use the available tools.`,
-      },
-      {
-        role: "user",
-        content:"When was iPhone 16 launched?",
-        //  "When was iPhone 16 launched?"
-        // "what is current weather in mumbai?"
+        type: "function",
+        function: {
+          name: "webSearch",
+          description: "Search the web for latest information.",
+          parameters: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: "Search query",
+              },
+            },
+            required: ["query"],
+          },
+        },
       },
     ],
-  tools: [
-    {
-      "type": "function",
-      "function": {
-        "name": "webSearch",
-        "description": "Search the latest information and realtime data on the internet.",
-        "parameters": {
-          // JSON Schema object
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "The search query to perform search on."
-            }
-            
-          },
-          "required": ["query"]
-        }
-      }
-    }
-  ],
-  tool_choice:'auto',
-    
   });
 
-  const toolCalls=completions.choices[0].message.tool_calls
+  const assistantMessage = firstResponse.choices[0].message;
 
-  if(!toolCalls){
-    console.log(`Assistant:${completions.choices[0].content}`);
+  console.log("\nAssistant Response:");
+  console.log(assistantMessage);
+
+  // If no tool call
+  if (!assistantMessage.tool_calls) {
+    console.log("\nFinal Answer:");
+    console.log(assistantMessage.content);
     return;
   }
 
-  for(const tool of toolCalls)
-  {
-    console.log('tool:',tool);
-    const functionName=tool.function.name;
-    const functionParams=tool.function.arguments;
+  messages.push(assistantMessage);
 
+  // Execute all tools
+  for (const toolCall of assistantMessage.tool_calls) {
+    const functionName = toolCall.function.name;
+    const args = JSON.parse(toolCall.function.arguments);
 
-    if (functionName===`webSearch`){
-      const toolResult= await webSearch(JSON.parse(functionParams))
-      console.log("Tool result:",toolResult);
+    let toolResult = "";
 
+    switch (functionName) {
+      case "webSearch":
+        toolResult = await webSearch(args);
+        break;
+
+      default:
+        toolResult = "Unknown tool.";
     }
+
+    messages.push({
+      role: "tool",
+      tool_call_id: toolCall.id,
+      content: toolResult,
+    });
   }
 
+  // Second LLM call
+  const finalResponse = await groq.chat.completions.create({
+    model: "openai/gpt-oss-20b",
+    messages,
+    temperature: 0,
+  });
 
-//   console.log(JSON.stringify(completions.choices[0].message,null,2));
+  console.log("\n==============================");
+  console.log("FINAL ANSWER");
+  console.log("==============================");
+
+  console.log(finalResponse.choices[0].message.content);
 }
 
-main();
-
-async function webSearch({query}){
-    // here we will do tavily api call
-    console.log("Calling web serach...");
-    return "iphone was launched on 20 sep 2024";
-
-}
+main().catch(console.error);
